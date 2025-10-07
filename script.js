@@ -35,6 +35,25 @@ document.addEventListener('DOMContentLoaded', function() {
     const sttProgressFill = document.getElementById('stt-progress-fill');
     const vttProgressFill = document.getElementById('vtt-progress-fill');
 
+    // Audio elementi için event listener'lar
+    audioOutput.addEventListener('loadstart', function() {
+        console.log("Audio load started");
+    });
+    
+    audioOutput.addEventListener('loadeddata', function() {
+        console.log("Audio data loaded");
+    });
+    
+    audioOutput.addEventListener('canplay', function() {
+        console.log("Audio can play");
+    });
+    
+    audioOutput.addEventListener('error', function(e) {
+        console.log("Audio error:", e);
+        console.log("Error code:", audioOutput.error.code);
+        console.log("Error message:", audioOutput.error.message);
+    });
+
     // Menü navigasyonu
     menuButtons.forEach(button => {
         button.addEventListener('click', function() {
@@ -116,9 +135,20 @@ document.addEventListener('DOMContentLoaded', function() {
         const originalText = playAudioBtn.innerHTML;
         playAudioBtn.innerHTML = '<span>▶️</span><span>Oynatılıyor...</span>';
         
+        console.log("Attempting to play audio:", audioOutput.src);
+        console.log("Audio element:", audioOutput);
+        console.log("Audio network state:", audioOutput.networkState);
+        console.log("Audio ready state:", audioOutput.readyState);
+        
         if (audioOutput.src) {
             // Önce ses seviyesini kontrol edelim
             audioOutput.volume = 1.0;
+            
+            // Ses dosyasının yüklenmesini bekle
+            if (audioOutput.readyState === 0) {
+                console.log("Audio not loaded, waiting for load...");
+                audioOutput.load();
+            }
             
             // Ses dosyasını oynatmaya çalış
             var playPromise = audioOutput.play();
@@ -141,6 +171,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             } else {
                 // Promise desteklenmiyorsa
+                console.log("Play promise not supported");
                 playAudioBtn.disabled = false;
                 playAudioBtn.innerHTML = originalText;
             }
@@ -277,7 +308,7 @@ document.addEventListener('DOMContentLoaded', function() {
             ttsProgressFill.style.width = '100%';
             
             if (data.success) {
-                finishConversion(data.file);
+                finishConversion(data.filename);
             } else {
                 ttsStatus.textContent = 'Hata: ' + data.error;
                 ttsStatus.style.color = 'red';
@@ -463,6 +494,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const audioSrc = '/audio/' + filename + '?t=' + timestamp;
         
         // Ses dosyasını ayarla
+        console.log("Setting audio source to:", audioSrc);
         audioOutput.src = audioSrc;
         audioOutput.style.display = 'block';
         playAudioBtn.style.display = 'block'; // Play butonunu göster
