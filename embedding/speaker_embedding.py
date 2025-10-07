@@ -51,17 +51,44 @@ def extract_embeddings(model, segments):
             
             # Segmentin uzunluğunu kontrol et ve sabit uzunlukta yap
             target_length = 16000  # 1 saniye @ 16kHz
-            if segment.shape[1] < target_length:
-                # Zero padding ile uzat
-                padding_length = target_length - segment.shape[1]
-                segment = torch.nn.functional.pad(segment, (0, padding_length), mode='constant', value=0)
-            elif segment.shape[1] > target_length:
-                # Kırp
-                segment = segment[:, :target_length]
             
-            # SpeechBrain için doğru tensör boyutlarını sağla
+            # Segmentin boyutlarını SpeechBrain için doğru şekilde ayarla
             if segment.dim() == 2:
-                segment = segment.unsqueeze(0)  # (batch, channels, time)
+                # (channels, time) -> (batch, channels, time)
+                segment = segment.unsqueeze(0)
+            
+            # Eğer segment hala doğru boyutta değilse düzelt
+            if segment.dim() != 3:
+                print(f"Warning: Segment {i} has incorrect dimensions: {segment.shape}")
+                embeddings.append(np.zeros(192))
+                continue
+                
+            # Batch boyutunu kontrol et
+            if segment.shape[0] != 1:
+                print(f"Warning: Segment {i} has incorrect batch size: {segment.shape}")
+                embeddings.append(np.zeros(192))
+                continue
+                
+            # Kanal sayısını kontrol et (SpeechBrain genellikle mono bekler)
+            if segment.shape[1] != 1:
+                print(f"Warning: Segment {i} has incorrect channel count: {segment.shape}")
+                # Mono'ya çevir
+                segment = torch.mean(segment, dim=1, keepdim=True)
+                
+            # Uzunluğu ayarla
+            if segment.shape[2] < target_length:
+                # Zero padding ile uzat
+                padding_length = target_length - segment.shape[2]
+                segment = torch.nn.functional.pad(segment, (0, padding_length), mode='constant', value=0)
+            elif segment.shape[2] > target_length:
+                # Kırp
+                segment = segment[:, :, :target_length]
+            
+            # Son kontrol - doğru boyutlarda mı?
+            if segment.shape != (1, 1, target_length):
+                print(f"Warning: Segment {i} has final incorrect shape: {segment.shape}")
+                embeddings.append(np.zeros(192))
+                continue
             
             # Embedding çıkarma - hata durumunda daha iyi geri dönüş
             with torch.no_grad():

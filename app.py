@@ -188,26 +188,16 @@ def perform_speaker_diarization(audio_path: str, n_speakers: int = 2) -> Optiona
         positive_energies = [energy for energy in energies if energy > 0.0]
         if positive_energies:
             median_energy = statistics.median(positive_energies)
-            energy_threshold = max(median_energy * 0.05, 5e-5)
+            energy_threshold = max(median_energy * 0.1, 1e-4)
         else:
             energy_threshold = 0.0
 
-        guard_indices = set(range(min(3, len(segment_meta))))
-        guard_indices.update(
-            range(max(0, len(segment_meta) - 3), len(segment_meta))
-        )
-        significant_indices = {
-            meta["index"]
-            for meta in segment_meta
-            if meta["energy"] >= energy_threshold
-        }
-        significant_indices.update(guard_indices)
+        significant_segments = [
+            meta for meta in segment_meta if meta["energy"] >= energy_threshold
+        ]
 
-        if not significant_indices:
-            significant_indices = {meta["index"] for meta in segment_meta}
-
-        significant_order = sorted(significant_indices)
-        significant_segments = [segment_meta[idx] for idx in significant_order]
+        if not significant_segments:
+            significant_segments = segment_meta
 
         global embedding_model
         if embedding_model is None:
@@ -219,6 +209,12 @@ def perform_speaker_diarization(audio_path: str, n_speakers: int = 2) -> Optiona
             embedding_model, [meta["segment"] for meta in significant_segments]
         )
         if not embeddings:
+            return None
+
+        # Check if we have valid embeddings
+        valid_embeddings = [emb for emb in embeddings if emb is not None and len(emb) > 0]
+        if not valid_embeddings:
+            logger.warning("No valid embeddings found for speaker diarization")
             return None
 
         labels = None
@@ -240,39 +236,11 @@ def perform_speaker_diarization(audio_path: str, n_speakers: int = 2) -> Optiona
                     smoothed_labels[idx] = smoothed_labels[idx - 1]
             labels = smoothed_labels
 
-        label_by_index: List[Optional[int]] = [None] * len(segment_meta)
-        for seg_label, seg_idx in zip(labels, significant_order):
-            if 0 <= seg_idx < len(label_by_index):
-                label_by_index[seg_idx] = int(seg_label)
-
-        last_seen: Optional[int] = None
-        for idx in range(len(label_by_index)):
-            if label_by_index[idx] is None:
-                label_by_index[idx] = last_seen
-            else:
-                last_seen = label_by_index[idx]
-
-        last_seen = None
-        for idx in range(len(label_by_index) - 1, -1, -1):
-            if label_by_index[idx] is None:
-                label_by_index[idx] = last_seen
-            else:
-                last_seen = label_by_index[idx]
-
-        default_label = next(
-            (val for val in label_by_index if val is not None),
-            0,
-        )
-        label_by_index = [
-            (val if val is not None else default_label) for val in label_by_index
-        ]
-
         diar_segments: List[Dict[str, Any]] = []
-        for meta, raw_label in zip(segment_meta, label_by_index):
-            label = int(raw_label) if raw_label is not None else 0
+        for meta, label in zip(significant_segments, labels):
             diar_segments.append(
                 {
-                    "speaker": f"Speaker {label % n_speakers + 1}",
+                    "speaker": f"Speaker {int(label) % n_speakers + 1}",
                     "start": meta["start"],
                     "end": meta["end"],
                 }
@@ -294,9 +262,9 @@ def perform_speaker_diarization(audio_path: str, n_speakers: int = 2) -> Optiona
             else:
                 merged_segments.append(seg.copy())
 
-        # Çok kısa (ör. <0.12s) segmentleri filtrele; bunlar genelde yanlış pozitiflerdir.
+        # Çok kısa (ör. <0.15s) segmentleri filtrele; bunlar genelde yanlış pozitiflerdir.
         stable_segments = [
-            seg for seg in merged_segments if (seg["end"] - seg["start"]) >= 0.12
+            seg for seg in merged_segments if (seg["end"] - seg["start"]) >= 0.15
         ]
 
         return stable_segments or merged_segments
@@ -428,18 +396,6 @@ def assign_overlap_labels(
 
     word_entries.sort(key=lambda item: (item["start"], item["end"]))
 
-    def diar_overlap_map(segment: Dict[str, Any]) -> Dict[str, float]:
-        coverage: Dict[str, float] = {}
-        for diar in diar_segments:
-            overlap_start = max(segment["start"], diar["start"])
-            overlap_end = min(segment["end"], diar["end"])
-            overlap = max(0.0, overlap_end - overlap_start)
-            if overlap <= 0.0:
-                continue
-            speaker = diar["speaker"]
-            coverage[speaker] = coverage.get(speaker, 0.0) + overlap
-        return coverage
-
     grouped_segments: List[Dict[str, Any]] = []
     for entry in word_entries:
         text = entry["text"].strip()
@@ -466,76 +422,14 @@ def assign_overlap_labels(
     def segment_duration(segment: Dict[str, Any]) -> float:
         return max(0.0, float(segment["end"]) - float(segment["start"]))
 
-    segment_stats: List[Dict[str, Any]] = []
-    for seg in grouped_segments:
-        coverage = diar_overlap_map(seg)
-        duration = segment_duration(seg)
-        if coverage and duration > 0.0:
-            dominant_speaker, dominant_value = max(
-                coverage.items(), key=lambda item: item[1]
-            )
-            dominance = dominant_value / duration if duration > 0 else 0.0
-        else:
-            dominant_speaker = None
-            dominance = 0.0
-        segment_stats.append(
-            {
-                "coverage": coverage,
-                "dominant": dominant_speaker,
-                "dominance": dominance,
-                "duration": duration,
-            }
-        )
-
     for idx in range(len(smoothed_segments)):
         seg = smoothed_segments[idx]
-        stats = segment_stats[idx]
-        coverage = stats["coverage"]
-        duration = stats["duration"]
-        dominant_speaker = stats["dominant"]
-        dominance = stats["dominance"]
+        duration = segment_duration(seg)
+        if duration >= 1.2:
+            continue
 
         prev_seg = smoothed_segments[idx - 1] if idx > 0 else None
         next_seg = smoothed_segments[idx + 1] if idx + 1 < len(smoothed_segments) else None
-
-        if duration >= 1.2:
-            if (
-                dominant_speaker
-                and seg["speaker"] != dominant_speaker
-                and dominance >= 0.55
-            ):
-                seg["speaker"] = dominant_speaker
-            continue
-
-        if (
-            dominant_speaker
-            and seg["speaker"] != dominant_speaker
-            and dominance >= 0.55
-        ):
-            seg["speaker"] = dominant_speaker
-            continue
-
-        prev_overlap = coverage.get(prev_seg["speaker"], 0.0) if prev_seg else 0.0
-        next_overlap = coverage.get(next_seg["speaker"], 0.0) if next_seg else 0.0
-
-        if dominance < 0.45 and duration > 0.0:
-            candidate_speaker: Optional[str] = None
-            if (
-                prev_seg
-                and next_seg
-                and prev_seg["speaker"] == next_seg["speaker"]
-                != seg["speaker"]
-                and prev_overlap + next_overlap >= duration * 0.3
-            ):
-                candidate_speaker = prev_seg["speaker"]
-            elif prev_seg and prev_overlap >= duration * 0.25:
-                candidate_speaker = prev_seg["speaker"]
-            elif next_seg and next_overlap >= duration * 0.25:
-                candidate_speaker = next_seg["speaker"]
-
-            if candidate_speaker:
-                seg["speaker"] = candidate_speaker
-                continue
 
         reassigned_speaker: Optional[str] = None
         if (
