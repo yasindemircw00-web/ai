@@ -211,6 +211,12 @@ def perform_speaker_diarization(audio_path: str, n_speakers: int = 2) -> Optiona
         if not embeddings:
             return None
 
+        # Check if we have valid embeddings
+        valid_embeddings = [emb for emb in embeddings if emb is not None and len(emb) > 0]
+        if not valid_embeddings:
+            logger.warning("No valid embeddings found for speaker diarization")
+            return None
+
         labels = None
         if cluster_embeddings is not None:
             try:
