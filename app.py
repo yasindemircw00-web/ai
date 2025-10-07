@@ -1,5 +1,6 @@
 import logging
 import os
+import statistics
 import uuid
 import warnings
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -157,12 +158,56 @@ def perform_speaker_diarization(audio_path: str, n_speakers: int = 2) -> Optiona
         extract_embed = extract_embeddings
 
         waveform, sample_rate = preproc(audio_path)
-        segment_length_sec = 0.25
+        segment_length_sec = 0.5
         segments = segment_fn(waveform, sample_rate, segment_length=segment_length_sec)
-        filtered_segments = [seg for seg in segments if seg.shape[-1] > 0]
+        total_duration = float(waveform.shape[-1]) / float(sample_rate) if sample_rate else 0.0
 
-        if not filtered_segments:
+        segment_meta: List[Dict[str, Any]] = []
+        energies: List[float] = []
+        for idx, seg in enumerate(segments):
+            if seg.shape[-1] <= 0:
+                continue
+            start = idx * segment_length_sec
+            end = min(start + segment_length_sec, total_duration)
+            # Ortalama mutlak genliği enerji temsilcisi olarak kullan.
+            energy = float(seg.abs().mean().item()) if hasattr(seg, "abs") else 0.0
+            segment_meta.append({
+                "index": idx,
+                "segment": seg,
+                "start": float(start),
+                "end": float(end),
+                "energy": energy,
+            })
+            energies.append(energy)
+
+        if not segment_meta:
             return None
+
+        # Sessiz (çok düşük enerjili) segmentleri filtreleyerek diarizasyonun
+        # gürültüye karşı daha kararlı olmasını sağla.
+        positive_energies = [energy for energy in energies if energy > 0.0]
+        if positive_energies:
+            median_energy = statistics.median(positive_energies)
+            energy_threshold = max(median_energy * 0.05, 5e-5)
+        else:
+            energy_threshold = 0.0
+
+        guard_indices = set(range(min(3, len(segment_meta))))
+        guard_indices.update(
+            range(max(0, len(segment_meta) - 3), len(segment_meta))
+        )
+        significant_indices = {
+            meta["index"]
+            for meta in segment_meta
+            if meta["energy"] >= energy_threshold
+        }
+        significant_indices.update(guard_indices)
+
+        if not significant_indices:
+            significant_indices = {meta["index"] for meta in segment_meta}
+
+        significant_order = sorted(significant_indices)
+        significant_segments = [segment_meta[idx] for idx in significant_order]
 
         global embedding_model
         if embedding_model is None:
@@ -170,7 +215,9 @@ def perform_speaker_diarization(audio_path: str, n_speakers: int = 2) -> Optiona
         if embedding_model is None:
             return None
 
-        embeddings = extract_embed(embedding_model, filtered_segments)
+        embeddings = extract_embed(
+            embedding_model, [meta["segment"] for meta in significant_segments]
+        )
         if not embeddings:
             return None
 
@@ -184,19 +231,75 @@ def perform_speaker_diarization(audio_path: str, n_speakers: int = 2) -> Optiona
         if not labels:
             labels = [idx % n_speakers for idx in range(len(embeddings))]
 
-        diar_segments = []
-        for idx, label in enumerate(labels):
-            start = idx * segment_length_sec
-            end = (idx + 1) * segment_length_sec
+        # Tek bir segmentlik sapmaları yumuşatarak konuşmacı geçişlerini
+        # daha akıcı hale getir.
+        if len(labels) >= 3:
+            smoothed_labels = labels[:]
+            for idx in range(1, len(labels) - 1):
+                if smoothed_labels[idx - 1] == smoothed_labels[idx + 1] != smoothed_labels[idx]:
+                    smoothed_labels[idx] = smoothed_labels[idx - 1]
+            labels = smoothed_labels
+
+        label_by_index: List[Optional[int]] = [None] * len(segment_meta)
+        for seg_label, seg_idx in zip(labels, significant_order):
+            if 0 <= seg_idx < len(label_by_index):
+                label_by_index[seg_idx] = int(seg_label)
+
+        last_seen: Optional[int] = None
+        for idx in range(len(label_by_index)):
+            if label_by_index[idx] is None:
+                label_by_index[idx] = last_seen
+            else:
+                last_seen = label_by_index[idx]
+
+        last_seen = None
+        for idx in range(len(label_by_index) - 1, -1, -1):
+            if label_by_index[idx] is None:
+                label_by_index[idx] = last_seen
+            else:
+                last_seen = label_by_index[idx]
+
+        default_label = next(
+            (val for val in label_by_index if val is not None),
+            0,
+        )
+        label_by_index = [
+            (val if val is not None else default_label) for val in label_by_index
+        ]
+
+        diar_segments: List[Dict[str, Any]] = []
+        for meta, raw_label in zip(segment_meta, label_by_index):
+            label = int(raw_label) if raw_label is not None else 0
             diar_segments.append(
                 {
-                    "speaker": f"Speaker {int(label) % n_speakers + 1}",
-                    "start": float(start),
-                    "end": float(end),
+                    "speaker": f"Speaker {label % n_speakers + 1}",
+                    "start": meta["start"],
+                    "end": meta["end"],
                 }
             )
 
-        return diar_segments
+        diar_segments.sort(key=lambda item: item["start"])
+
+        merged_segments: List[Dict[str, Any]] = []
+        for seg in diar_segments:
+            if not merged_segments:
+                merged_segments.append(seg.copy())
+                continue
+            prev = merged_segments[-1]
+            if (
+                prev["speaker"] == seg["speaker"]
+                and seg["start"] - prev["end"] <= 0.1
+            ):
+                prev["end"] = max(prev["end"], seg["end"])
+            else:
+                merged_segments.append(seg.copy())
+
+        # Çok kısa (ör. <0.12s) segmentleri filtrele; bunlar genelde yanlış pozitiflerdir.
+        stable_segments = [
+            seg for seg in merged_segments if (seg["end"] - seg["start"]) >= 0.12
+        ]
+
+        return stable_segments or merged_segments
     except Exception as exc:
         logger.warning("Speaker diarization failed: %s", exc)
         return None
@@ -212,7 +315,9 @@ def is_overlap(seg1: Dict[str, Any], seg2: Dict[str, Any], threshold: float = 0.
     return overlap_duration / min_duration > threshold
 
 
-def assign_overlap_labels(whisper_segments: List[Any], diarization_segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def assign_overlap_labels(
+    whisper_segments: List[Any], diarization_segments: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     if not whisper_segments:
         return []
 
@@ -223,7 +328,7 @@ def assign_overlap_labels(whisper_segments: List[Any], diarization_segments: Lis
         text = str(getattr(seg, "text", "") or "")
         words_data = getattr(seg, "words", None)
 
-        formatted_words = []
+        formatted_words: List[Dict[str, Any]] = []
         if isinstance(words_data, list):
             for word in words_data:
                 w_start = getattr(word, "start", None) or getattr(word, "start_time", None)
@@ -231,7 +336,13 @@ def assign_overlap_labels(whisper_segments: List[Any], diarization_segments: Lis
                 w_text = str(getattr(word, "word", "") or "").strip()
                 if w_start is None or w_end is None or not w_text:
                     continue
-                formatted_words.append({"start": float(w_start), "end": float(w_end), "word": w_text})
+                formatted_words.append(
+                    {
+                        "start": float(w_start),
+                        "end": float(w_end),
+                        "word": w_text,
+                    }
+                )
 
         formatted_whisper_segments.append(
             {
@@ -265,7 +376,7 @@ def assign_overlap_labels(whisper_segments: List[Any], diarization_segments: Lis
         ]
 
     diar_segments.sort(key=lambda d: d["start"])
-    speaker_fallback = diar_segments[0]["speaker"]
+    default_speaker = diar_segments[0]["speaker"]
 
     def choose_diar_index(start: float, end: float) -> int:
         best_idx = 0
@@ -285,80 +396,187 @@ def assign_overlap_labels(whisper_segments: List[Any], diarization_segments: Lis
             )
         return best_idx
 
-    diar_text: Dict[int, Dict[str, Any]] = {}
-
+    word_entries: List[Dict[str, Any]] = []
     for seg in formatted_whisper_segments:
         words = seg["words"]
         if words:
             for word in words:
                 idx = choose_diar_index(word["start"], word["end"])
-                entry = diar_text.setdefault(
-                    idx,
+                diar = diar_segments[idx]
+                word_entries.append(
                     {
-                        "speaker": diar_segments[idx]["speaker"],
-                        "parts": [],
-                        "start": word["start"],
-                        "end": word["end"],
-                    },
+                        "speaker": diar["speaker"],
+                        "start": float(word["start"]),
+                        "end": float(word["end"]),
+                        "text": word["word"],
+                    }
                 )
-                entry["parts"].append(word["word"])
-                entry["start"] = min(entry["start"], word["start"])
-                entry["end"] = max(entry["end"], word["end"])
         elif seg["text"]:
             idx = choose_diar_index(seg["start"], seg["end"])
-            entry = diar_text.setdefault(
-                idx,
+            diar = diar_segments[idx]
+            word_entries.append(
                 {
-                    "speaker": diar_segments[idx]["speaker"],
-                    "parts": [],
+                    "speaker": diar["speaker"],
                     "start": seg["start"],
                     "end": seg["end"],
-                },
+                    "text": seg["text"],
+                }
             )
-            entry["parts"].append(seg["text"])
-            entry["start"] = min(entry["start"], seg["start"])
-            entry["end"] = max(entry["end"], seg["end"])
 
-    labeled_segments: List[Dict[str, Any]] = []
-    for idx, diar in enumerate(diar_segments):
-        entry = diar_text.get(
-            idx,
-            {
-                "speaker": diar["speaker"],
-                "parts": [],
-                "start": diar["start"],
-                "end": diar["end"],
-            },
-        )
-        text = " ".join(part for part in entry["parts"] if part).strip()
+    if not word_entries:
+        return []
+
+    word_entries.sort(key=lambda item: (item["start"], item["end"]))
+
+    def diar_overlap_map(segment: Dict[str, Any]) -> Dict[str, float]:
+        coverage: Dict[str, float] = {}
+        for diar in diar_segments:
+            overlap_start = max(segment["start"], diar["start"])
+            overlap_end = min(segment["end"], diar["end"])
+            overlap = max(0.0, overlap_end - overlap_start)
+            if overlap <= 0.0:
+                continue
+            speaker = diar["speaker"]
+            coverage[speaker] = coverage.get(speaker, 0.0) + overlap
+        return coverage
+
+    grouped_segments: List[Dict[str, Any]] = []
+    for entry in word_entries:
+        text = entry["text"].strip()
         if not text:
             continue
-        start = max(entry["start"], diar["start"])
-        end = min(entry["end"], diar["end"])
-        if end <= start:
-            start, end = diar["start"], diar["end"]
-        labeled_segments.append(
+        if not grouped_segments:
+            grouped_segments.append(entry.copy())
+            grouped_segments[-1]["text"] = text
+            continue
+
+        prev = grouped_segments[-1]
+        gap = entry["start"] - prev["end"]
+        if entry["speaker"] == prev["speaker"] and gap <= 0.35:
+            prev["end"] = max(prev["end"], entry["end"])
+            prev["text"] = (prev["text"].rstrip() + " " + text.lstrip()).strip()
+        else:
+            grouped_segments.append({**entry, "text": text})
+
+    if not grouped_segments:
+        return []
+
+    smoothed_segments = [seg.copy() for seg in grouped_segments]
+
+    def segment_duration(segment: Dict[str, Any]) -> float:
+        return max(0.0, float(segment["end"]) - float(segment["start"]))
+
+    segment_stats: List[Dict[str, Any]] = []
+    for seg in grouped_segments:
+        coverage = diar_overlap_map(seg)
+        duration = segment_duration(seg)
+        if coverage and duration > 0.0:
+            dominant_speaker, dominant_value = max(
+                coverage.items(), key=lambda item: item[1]
+            )
+            dominance = dominant_value / duration if duration > 0 else 0.0
+        else:
+            dominant_speaker = None
+            dominance = 0.0
+        segment_stats.append(
             {
-                "start": float(start),
-                "end": float(end),
-                "text": text,
-                "speaker": entry.get("speaker", speaker_fallback),
+                "coverage": coverage,
+                "dominant": dominant_speaker,
+                "dominance": dominance,
+                "duration": duration,
             }
         )
 
-    labeled_segments.sort(key=lambda s: s["start"])
+    for idx in range(len(smoothed_segments)):
+        seg = smoothed_segments[idx]
+        stats = segment_stats[idx]
+        coverage = stats["coverage"]
+        duration = stats["duration"]
+        dominant_speaker = stats["dominant"]
+        dominance = stats["dominance"]
+
+        prev_seg = smoothed_segments[idx - 1] if idx > 0 else None
+        next_seg = smoothed_segments[idx + 1] if idx + 1 < len(smoothed_segments) else None
+
+        if duration >= 1.2:
+            if (
+                dominant_speaker
+                and seg["speaker"] != dominant_speaker
+                and dominance >= 0.55
+            ):
+                seg["speaker"] = dominant_speaker
+            continue
+
+        if (
+            dominant_speaker
+            and seg["speaker"] != dominant_speaker
+            and dominance >= 0.55
+        ):
+            seg["speaker"] = dominant_speaker
+            continue
+
+        prev_overlap = coverage.get(prev_seg["speaker"], 0.0) if prev_seg else 0.0
+        next_overlap = coverage.get(next_seg["speaker"], 0.0) if next_seg else 0.0
+
+        if dominance < 0.45 and duration > 0.0:
+            candidate_speaker: Optional[str] = None
+            if (
+                prev_seg
+                and next_seg
+                and prev_seg["speaker"] == next_seg["speaker"]
+                != seg["speaker"]
+                and prev_overlap + next_overlap >= duration * 0.3
+            ):
+                candidate_speaker = prev_seg["speaker"]
+            elif prev_seg and prev_overlap >= duration * 0.25:
+                candidate_speaker = prev_seg["speaker"]
+            elif next_seg and next_overlap >= duration * 0.25:
+                candidate_speaker = next_seg["speaker"]
+
+            if candidate_speaker:
+                seg["speaker"] = candidate_speaker
+                continue
+
+        reassigned_speaker: Optional[str] = None
+        if (
+            prev_seg
+            and next_seg
+            and prev_seg["speaker"] == next_seg["speaker"] != seg["speaker"]
+            and (duration <= 0.7 or len(seg["text"].split()) <= 4)
+        ):
+            reassigned_speaker = prev_seg["speaker"]
+        else:
+            candidates: List[Dict[str, Any]] = []
+            if prev_seg and prev_seg["speaker"] != seg["speaker"]:
+                candidates.append(prev_seg)
+            if next_seg and next_seg["speaker"] != seg["speaker"]:
+                candidates.append(next_seg)
+            if candidates and duration <= 0.45:
+                closest = min(
+                    candidates,
+                    key=lambda item: abs(
+                        (seg["start"] + seg["end"]) / 2.0
+                        - (item["start"] + item["end"]) / 2.0
+                    ),
+                )
+                reassigned_speaker = closest["speaker"]
+
+        if reassigned_speaker:
+            seg["speaker"] = reassigned_speaker
 
     merged_segments: List[Dict[str, Any]] = []
-    if labeled_segments:
-        current = labeled_segments[0].copy()
-        for seg in labeled_segments[1:]:
-            if current["speaker"] == seg["speaker"] and seg["start"] - current["end"] <= 0.2:
-                current["end"] = max(current["end"], seg["end"])
-                current["text"] = (current["text"].rstrip() + " " + seg["text"].lstrip()).strip()
-            else:
-                merged_segments.append(current)
-                current = seg.copy()
-        merged_segments.append(current)
+    for seg in smoothed_segments:
+        if not merged_segments:
+            merged_segments.append(seg.copy())
+            continue
+
+        prev = merged_segments[-1]
+        gap = seg["start"] - prev["end"]
+        if seg["speaker"] == prev["speaker"] and gap <= 0.5:
+            prev["end"] = max(prev["end"], seg["end"])
+            prev["text"] = (prev["text"].rstrip() + " " + seg["text"].lstrip()).strip()
+        else:
+            merged_segments.append(seg.copy())
 
     final_segments: List[Dict[str, Any]] = []
     for i, seg in enumerate(merged_segments):
@@ -370,7 +588,19 @@ def assign_overlap_labels(whisper_segments: List[Any], diarization_segments: Lis
             seg["speaker"] = f"{seg['speaker']} (OVERLAP)"
         final_segments.append(seg)
 
-    return final_segments
+    if final_segments:
+        return final_segments
+
+    return [
+        {
+            "start": seg["start"],
+            "end": seg["end"],
+            "text": seg["text"],
+            "speaker": default_speaker,
+        }
+        for seg in formatted_whisper_segments
+        if seg["text"]
+    ]
 
 
 def match_speaker_segments(whisper_segments: List[Any], diarization_segments: List[Any]) -> List[Dict[str, Any]]:
