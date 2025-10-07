@@ -1,0 +1,18 @@
+flask==3.1.2
+TTS==0.21.1
+pydub==0.25.1
+torch==2.7.1+cu118
+torchaudio==2.7.1+cu118
+torchvision==0.22.1+cu118
+faster-whisper==1.0.3
+sympy==1.13.3
+numpy==1.22.0
+pandas==1.5.3
+networkx==2.8.8
+protobuf==3.20.3
+gruut==2.2.3
+# inaSpeechSegmenter kaldırıldı - sürüm çakışmaları nedeniyle
+speechbrain==0.5.14
+scikit-learn
+hdbscan
+librosa

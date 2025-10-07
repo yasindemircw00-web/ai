@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎙️ Ses-Metin Dönüştürücü</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎙️ Ses-Metin Dönüştürücü</h1>
+            <p>Metinlerinizi sese, seslerinizi metne dönüştürün</p>
+        </div>
+
+        <div class="main-content">
+            <!-- Sol Menü -->
+            <nav class="sidebar">
+                <ul>
+                    <li>
+                        <button class="menu-btn active" data-target="tts-section">
+                            <span>📝</span>
+                            <span>Metin → Ses</span>
+                        </button>
+                    </li>
+                    <li>
+                        <button class="menu-btn" data-target="stt-section">
+                            <span>🎤</span>
+                            <span>Ses → Metin</span>
+                        </button>
+                    </li>
+                    <li>
+                        <button class="menu-btn" data-target="vtt-section">
+                            <span>🎬</span>
+                            <span>Video → Metin</span>
+                        </button>
+                    </li>
+                </ul>
+            </nav>
+
+            <!-- İçerik Alanı -->
+            <div class="content-area">
+                <!-- Metin → Ses -->
+                <div id="tts-section" class="section active">
+                    <div class="section-title">
+                        <div class="icon">📝</div>
+                        <span>Metin → Ses</span>
+                    </div>
+                    
+                    <textarea id="textInput" placeholder="Sese dönüştürmek istediğiniz metni buraya yazın..."></textarea>
+                    
+                    <div class="button-group">
+                        <button class="btn-primary" id="convertToSpeech">
+                            <span>🔊</span>
+                            <span>Sese Çevir</span>
+                        </button>
+                        <button class="btn-secondary" id="clearText">
+                            <span>🗑️</span>
+                            <span>Temizle</span>
+                        </button>
+                    </div>
+
+                    <audio id="audioOutput" class="audio-player" style="display: none; margin-top: 15px;"></audio>
+                    <button class="btn-secondary" id="playAudio" style="display: none; width: 100%; margin-top: 10px;">
+                        <span>▶️</span>
+                        <span>Sesi Oynat</span>
+                    </button>
+                    
+                    <div class="status-section">
+                        <div id="tts-status" class="info-text">Metni yazın ve "Sese Çevir" butonuna tıklayın</div>
+                        <div class="progress-bar">
+                            <div id="tts-progress-fill" class="progress-fill"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Ses → Metin -->
+                <div id="stt-section" class="section">
+                    <div class="section-title">
+                        <div class="icon">🎤</div>
+                        <span>Ses → Metin</span>
+                    </div>
+
+                    <div class="file-input-wrapper">
+                        <input type="file" id="audioFile" accept="audio/*">
+                        <label for="audioFile" class="file-label">
+                            <span>📁</span>
+                            <span>Ses Dosyası Seç</span>
+                        </label>
+                    </div>
+
+                    <audio id="recordedAudio" class="audio-player" controls style="display: none;"></audio>
+
+                    <button class="btn-primary" id="convertToText" style="width: 100%; margin: 15px 0;">
+                        <span>📄</span>
+                        <span>Metne Çevir</span>
+                    </button>
+                    
+                    <textarea id="textOutput" placeholder="Dönüştürülen metin burada görünecek...&#10;&#10;Format: [Başlangıç-Bitiş] Konuşmacı: Metin&#10;Örnek: [00:05-00:12] Speaker 1: Merhaba, nasılsınız?&#10;[00:13-00:18] Speaker 2: Ben iyiyim, teşekkür ederim." readonly></textarea>
+
+                    <button class="btn-secondary" id="copyText" style="width: 100%;">
+                        <span>📋</span>
+                        <span>Metni Kopyala</span>
+                    </button>
+                    
+                    <div class="status-section">
+                        <div id="stt-status" class="info-text">Kayıt yapın veya ses dosyası yükleyin</div>
+                        <div class="progress-bar">
+                            <div id="stt-progress-fill" class="progress-fill"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Video → Metin -->
+                <div id="vtt-section" class="section">
+                    <div class="section-title">
+                        <div class="icon">🎬</div>
+                        <span>Video → Metin</span>
+                    </div>
+
+                    <div class="file-input-wrapper">
+                        <input type="file" id="videoFile" accept="video/*">
+                        <label for="videoFile" class="file-label">
+                            <span>📁</span>
+                            <span>Video Dosyası Seç</span>
+                        </label>
+                    </div>
+
+                    <video id="uploadedVideo" class="audio-player" controls style="display: none;"></video>
+
+                    <button class="btn-primary" id="convertVideoToText" style="width: 100%; margin: 15px 0;">
+                        <span>📄</span>
+                        <span>Metne Çevir</span>
+                    </button>
+                    
+                    <textarea id="videoTextOutput" placeholder="Dönüştürülen metin burada görünecek...&#10;&#10;Format: [Başlangıç-Bitiş] Konuşmacı: Metin&#10;Örnek: [00:05-00:12] Speaker 1: Merhaba, nasılsınız?&#10;[00:13-00:18] Speaker 2: Ben iyiyim, teşekkür ederim." readonly></textarea>
+
+                    <button class="btn-secondary" id="copyVideoText" style="width: 100%;">
+                        <span>📋</span>
+                        <span>Metni Kopyala</span>
+                    </button>
+                    
+                    <div class="status-section">
+                        <div id="vtt-status" class="info-text">Video dosyası yükleyin</div>
+                        <div class="progress-bar">
+                            <div id="vtt-progress-fill" class="progress-fill"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="/script.js"></script>
+</body>
+</html>
